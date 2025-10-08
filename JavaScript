@@ -1,0 +1,14 @@
+// Real TON verification (pseudo-code)
+async function verifyTONTransaction(txHash, expectedRecipient) {
+  try {
+    const response = await axios.get(`https://tonapi.io/v1/blockchain/transactions/${txHash}`);
+    const tx = response.data;
+    
+    return tx.out_msgs.some(msg => 
+      msg.destination === expectedRecipient && 
+      msg.value > 0
+    );
+  } catch (error) {
+    return false;
+  }
+}
