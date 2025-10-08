@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TapCoin</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: Arial, sans-serif;
+        }
+        .game-container {
+            text-align: center;
+            color: white;
+        }
+        .coin {
+            width: 200px;
+            height: 200px;
+            background: gold;
+            border-radius: 50%;
+            margin: 20px auto;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            cursor: pointer;
+            user-select: none;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        .balance {
+            font-size: 32px;
+            margin: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <div class="balance">Balance: <span id="balance">0</span> coins</div>
+        <div class="coin" id="coin">TAP</div>
+        <div>Level: <span id="level">1</span></div>
+    </div>
+
+    <script>
+        const coin = document.getElementById('coin');
+        const balanceElement = document.getElementById('balance');
+        const levelElement = document.getElementById('level');
+
+        let balance = 0;
+        let level = 1;
+
+        // Initialize Telegram WebApp
+        Telegram.WebApp.ready();
+
+        // Get user data from Telegram
+        const user = Telegram.WebApp.initDataUnsafe.user;
+        if (user) {
+            // You can use user.id to identify the user
+            console.log(user);
+        }
+
+        // Function to update balance on the server
+        async function updateBalance(newBalance) {
+            // Here we would send a request to our backend to update the user's balance
+            // We'll use the user ID from Telegram
+            const response = await fetch('/api/update-balance', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    userId: user.id,
+                    balance: newBalance
+                })
+            });
+            const data = await response.json();
+            return data;
+        }
+
+        // Function to get user data from the server
+        async function getUserData() {
+            const response = await fetch(`/api/user/${user.id}`);
+            const data = await response.json();
+            return data;
+        }
+
+        // Load user data when the app starts
+        getUserData().then(data => {
+            balance = data.balance;
+            level = data.level;
+            balanceElement.textContent = balance;
+            levelElement.textContent = level;
+        });
+
+        // Handle tap on the coin
+        coin.addEventListener('click', async () => {
+            balance += level;
+            balanceElement.textContent = balance;
+            
+            // Update the balance on the server
+            const result = await updateBalance(balance);
+            if (result.success) {
+                // Maybe update level if needed
+                if (balance >= result.nextLevel) {
+                    level++;
+                    levelElement.textContent = level;
+                }
+            }
+        });
+    </script>
+</body>
+</html>
