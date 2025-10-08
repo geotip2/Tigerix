@@ -1,0 +1,472 @@
+const express = require('express');
+const TelegramBot = require('node-telegram-bot-api');
+const mongoose = require('mongoose');
+
+const app = express();
+app.use(express.json());
+
+// MongoDB connection
+mongoose.connect('mongodb://localhost:27017/telegram_game', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+});
+
+// User schema
+const userSchema = new mongoose.Schema({
+  userId: { type: Number, unique: true },
+  username: String,
+  firstName: String,
+  lastName: String,
+  balance: { type: Number, default: 0 },
+  totalClicks: { type: Number, default: 0 },
+  lastClick: Date,
+  referrals: [Number],
+  referredBy: Number,
+  level: { type: Number, default: 1 },
+  totalDonated: { type: Number, default: 0 },
+  donationBonusReceived: { type: Boolean, default: false }
+});
+
+const donationSchema = new mongoose.Schema({
+  userId: Number,
+  amount: Number,
+  txHash: String,
+  status: { type: String, default: 'pending' }, // pending, verified, failed
+  createdAt: { type: Date, default: Date.now }
+});
+
+const User = mongoose.model('User', userSchema);
+const Donation = mongoose.model('Donation', donationSchema);
+
+// Telegram Bot
+const bot = new TelegramBot('7937307488:AAGM9zx5M-Eiwot_JtJqW3SNM40tIoiJEJ8', { polling: true });
+
+// Game constants
+const COINS_PER_CLICK = 1;
+const REFERRAL_BONUS = 50;
+const DONATION_BONUS = 1000; // Bonus coins for donating
+const TON_WALLET = 'UQDQ-3U4PRkA96v4zhteKVrPbrlbKSV4NfEBPSdd-LtXbKzb';
+const LEVEL_THRESHOLDS = [0, 100, 500, 1000, 2500, 5000];
+
+// Start command
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const referralId = msg.text.split(' ')[1];
+  
+  let user = await User.findOne({ userId });
+  
+  if (!user) {
+    user = new User({
+      userId,
+      username: msg.from.username,
+      firstName: msg.from.first_name,
+      lastName: msg.from.last_name,
+      balance: 100 // Starting bonus
+    });
+    
+    // Handle referral
+    if (referralId) {
+      const referrer = await User.findOne({ userId: parseInt(referralId) });
+      if (referrer) {
+        user.referredBy = referrer.userId;
+        referrer.referrals.push(userId);
+        referrer.balance += REFERRAL_BONUS;
+        await referrer.save();
+      }
+    }
+    
+    await user.save();
+  }
+  
+  const referralLink = `https://t.me/${bot.options.username}?start=${userId}`;
+  
+  const welcomeMessage = `
+🎮 **TapCoin - Earn Crypto by Tapping!**
+
+💰 **Balance:** ${user.balance} coins
+📊 **Level:** ${user.level}
+👥 **Referrals:** ${user.referrals.length}
+💎 **Donations:** ${user.totalDonated} TON
+
+Tap the button below to start earning! Every tap gives you coins. Invite friends to get bonus coins!
+
+**Commands:**
+/start - Start game
+/profile - Your profile
+/leaderboard - Top players
+/donate - Donate TON and get bonus
+  `;
+  
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🎯 TAP TO EARN!', callback_data: 'tap' }],
+        [
+          { text: '👤 Profile', callback_data: 'profile' }, 
+          { text: '🏆 Leaderboard', callback_data: 'leaderboard' }
+        ],
+        [
+          { text: '👥 Invite Friends', callback_data: 'invite' },
+          { text: '💎 Donate TON', callback_data: 'donate' }
+        ]
+      ]
+    }
+  };
+  
+  bot.sendMessage(chatId, welcomeMessage, { 
+    parse_mode: 'Markdown',
+    ...keyboard
+  });
+});
+
+// Handle button clicks
+bot.on('callback_query', async (callbackQuery) => {
+  const message = callbackQuery.message;
+  const userId = callbackQuery.from.id;
+  const data = callbackQuery.data;
+  
+  const user = await User.findOne({ userId });
+  if (!user) return;
+  
+  switch (data) {
+    case 'tap':
+      // ... (existing tap code remains the same)
+      const now = new Date();
+      const timeDiff = now - new Date(user.lastClick);
+      
+      if (timeDiff < 100) {
+        bot.answerCallbackQuery(callbackQuery.id, { text: 'Too fast! Slow down!' });
+        return;
+      }
+      
+      let coinsEarned = COINS_PER_CLICK * user.level;
+      
+      if (Math.random() < 0.1) {
+        coinsEarned *= 2;
+        bot.answerCallbackQuery(callbackQuery.id, { text: `🎉 Lucky! Double coins: ${coinsEarned}` });
+      } else {
+        bot.answerCallbackQuery(callbackQuery.id, { text: `+${coinsEarned} coins!` });
+      }
+      
+      user.balance += coinsEarned;
+      user.totalClicks += 1;
+      user.lastClick = now;
+      
+      const newLevel = calculateLevel(user.balance);
+      if (newLevel > user.level) {
+        user.level = newLevel;
+        bot.sendMessage(message.chat.id, `🎊 Level Up! You are now Level ${newLevel}!`);
+      }
+      
+      await user.save();
+      
+      const updatedMessage = message.text.split('\n')[0] + `\n💰 **Balance:** ${user.balance} coins\n📊 **Level:** ${user.level}`;
+      bot.editMessageText(updatedMessage, {
+        chat_id: message.chat.id,
+        message_id: message.message_id,
+        parse_mode: 'Markdown',
+        reply_markup: message.reply_markup
+      });
+      break;
+      
+    case 'profile':
+      const profileMessage = `
+👤 **Your Profile**
+
+💰 **Balance:** ${user.balance} coins
+📊 **Level:** ${user.level}
+🎯 **Total Taps:** ${user.totalClicks}
+👥 **Referrals:** ${user.referrals.length}
+💎 **TON Donated:** ${user.totalDonated}
+📈 **Referral Bonus:** ${user.referrals.length * REFERRAL_BONUS} coins
+
+**Next Level:** ${LEVEL_THRESHOLDS[user.level] || 'Max'} coins needed
+      `;
+      bot.sendMessage(message.chat.id, profileMessage, { parse_mode: 'Markdown' });
+      break;
+      
+    case 'leaderboard':
+      const topUsers = await User.find().sort({ balance: -1 }).limit(10);
+      let leaderboardMessage = '🏆 **Top Players**\n\n';
+      
+      topUsers.forEach((user, index) => {
+        const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🔸';
+        leaderboardMessage += `${medal} ${user.firstName}: ${user.balance} coins\n`;
+      });
+      
+      bot.sendMessage(message.chat.id, leaderboardMessage, { parse_mode: 'Markdown' });
+      break;
+      
+    case 'invite':
+      const referralLink = `https://t.me/${bot.options.username}?start=${userId}`;
+      const inviteMessage = `
+👥 **Invite Friends & Earn!**
+
+Share your referral link and get ${REFERRAL_BONUS} coins for each friend who joins!
+
+Your referral link:
+\`${referralLink}\`
+
+You've invited: ${user.referrals.length} friends
+Total bonus: ${user.referrals.length * REFERRAL_BONUS} coins
+      `;
+      bot.sendMessage(message.chat.id, inviteMessage, { parse_mode: 'Markdown' });
+      break;
+      
+    case 'donate':
+      const donateMessage = `
+💎 **Donate TON & Get Bonus!**
+
+Support the game development and get **${DONATION_BONUS} bonus coins** for any TON donation!
+
+**TON Wallet Address:**
+\`${TON_WALLET}\`
+
+**Instructions:**
+1. Send any amount of TON to the address above
+2. Click the "Verify Donation" button below
+3. Enter your transaction hash
+4. Receive ${DONATION_BONUS} bonus coins!
+
+*Note: You can only receive the donation bonus once.*
+      `;
+      
+      const donateKeyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✅ Verify Donation', callback_data: 'verify_donation' }],
+            [{ text: '📋 Copy Wallet Address', callback_data: 'copy_wallet' }],
+            [{ text: '🔙 Back to Main', callback_data: 'main_menu' }]
+          ]
+        }
+      };
+      
+      bot.sendMessage(message.chat.id, donateMessage, { 
+        parse_mode: 'Markdown',
+        ...donateKeyboard 
+      });
+      break;
+      
+    case 'verify_donation':
+      // Ask user for transaction hash
+      bot.sendMessage(message.chat.id, 
+        'Please send me your TON transaction hash to verify your donation:\n\n' +
+        'Send it in this format: `/verify TX_HASH`\n' +
+        'Example: `/verify abc123...`',
+        { parse_mode: 'Markdown' }
+      );
+      break;
+      
+    case 'copy_wallet':
+      bot.sendMessage(message.chat.id, 
+        `**TON Wallet Address:**\n\`${TON_WALLET}\`\n\nCopy this address and use it in your TON wallet to send donation.`,
+        { parse_mode: 'Markdown' }
+      );
+      break;
+      
+    case 'main_menu':
+      // Return to main menu
+      const mainMenuMessage = `
+🎮 **TapCoin - Earn Crypto by Tapping!**
+
+💰 **Balance:** ${user.balance} coins
+📊 **Level:** ${user.level}
+👥 **Referrals:** ${user.referrals.length}
+💎 **Donations:** ${user.totalDonated} TON
+
+Tap the button below to start earning!
+      `;
+      
+      const mainKeyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🎯 TAP TO EARN!', callback_data: 'tap' }],
+            [
+              { text: '👤 Profile', callback_data: 'profile' }, 
+              { text: '🏆 Leaderboard', callback_data: 'leaderboard' }
+            ],
+            [
+              { text: '👥 Invite Friends', callback_data: 'invite' },
+              { text: '💎 Donate TON', callback_data: 'donate' }
+            ]
+          ]
+        }
+      };
+      
+      bot.editMessageText(mainMenuMessage, {
+        chat_id: message.chat.id,
+        message_id: message.message_id,
+        parse_mode: 'Markdown',
+        reply_markup: mainKeyboard.reply_markup
+      });
+      break;
+  }
+});
+
+// Handle donation verification command
+bot.onText(/\/verify (.+)/, async (msg, match) => {
+  const userId = msg.from.id;
+  const txHash = match[1];
+  
+  const user = await User.findOne({ userId });
+  if (!user) {
+    bot.sendMessage(msg.chat.id, 'Please start the game first with /start');
+    return;
+  }
+  
+  if (user.donationBonusReceived) {
+    bot.sendMessage(msg.chat.id, 
+      '❌ You have already received the donation bonus. Thank you for your support!'
+    );
+    return;
+  }
+  
+  // Check if transaction hash already used
+  const existingDonation = await Donation.findOne({ txHash });
+  if (existingDonation) {
+    bot.sendMessage(msg.chat.id, 
+      '❌ This transaction hash has already been used. Please contact support if this is an error.'
+    );
+    return;
+  }
+  
+  // Create donation record (in real implementation, you wouldlconstonsterify with TON blockchain)
+  const donation = new Donation({
+    userId,
+    txHash,
+    status: 'verified' // Auto-verify for demo. In production, use TON API to verify
+  });
+  
+  await donation.save();
+  
+  // Update user balance and mark as received bonus
+  user.balance += DONATION_BONUS;
+  user.totalDonated += 1; // In real implementation, track actual amount
+  user.donationBonusReceived = true;
+  await user.save();
+  
+  const successMessage = `
+🎉 **Donation Verified Successfully!**
+
+✅ Transaction confirmed
+💰 **+${DONATION_BONUS} bonus coins** added to your balance
+💎 Thank you for supporting the game!
+
+**New Balance:** ${user.balance} coins
+  `;
+  
+  bot.sendMessage(msg.chat.id, successMessage, { parse_mode: 'Markdown' });
+});
+
+// Donate command
+bot.onText(/\/donate/, async (msg) => {
+  const userId = msg.from.id;
+  const user = await User.findOne({ userId });
+  
+  if (!user) {
+    bot.sendMessage(msg.chat.id, 'Please start the game first with /start');
+    return;
+  }
+  
+  const donateMessage = `
+💎 **Donate TON & Get Bonus!**
+
+Support the game development and get **${DONATION_BONUS} bonus coins** for any TON donation!
+
+**TON Wallet Address:**
+\`${TON_WALLET}\`
+
+**Instructions:**
+1. Send any amount of TON to the address above
+2. Use /verify YOUR_TX_HASH to verify
+3. Receive ${DONATION_BONUS} bonus coins!
+
+*Note: You can only receive the donation bonus once.*
+${user.donationBonusReceived ? '\n❌ *You have already received the donation bonus*' : ''}
+  `;
+  
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '✅ Verify Donation', callback_data: 'verify_donation' }],
+        [{ text: '📋 Copy Wallet Address', callback_data: 'copy_wallet' }]
+      ]
+    }
+  };
+  
+  bot.sendMessage(msg.chat.id, donateMessage, { 
+    parse_mode: 'Markdown',
+    ...keyboard 
+  });
+});
+
+// Profile command (updated)
+bot.onText(/\/profile/, async (msg) => {
+  const userId = msg.from.id;
+  const user = await User.findOne({ userId });
+  
+  if (!user) {
+    bot.sendMessage(msg.chat.id, 'Please start the game first with /start');
+    return;
+  }
+  
+  const profileMessage = `
+👤 **Your Profile**
+
+💰 **Balance:** ${user.balance} coins
+📊 **Level:** ${user.level}
+🎯 **Total Taps:** ${user.totalClicks}
+👥 **Referrals:** ${user.referrals.length}
+💎 **TON Donated:** ${user.totalDonated}
+📈 **Referral Bonus:** ${user.referrals.length * REFERRAL_BONUS} coins
+${user.donationBonusReceived ? '✅ **Donation Bonus:** Received' : '❌ **Donation Bonus:** Not received'}
+
+**Next Level:** ${LEVEL_THRESHOLDS[user.level] || 'Max'} coins needed
+  `;
+  
+  bot.sendMessage(msg.chat.id, profileMessage, { parse_mode: 'Markdown' });
+});
+
+// Leaderboard command (existing - remains the same)
+bot.onText(/\/leaderboard/, async (msg) => {
+  const topUsers = await User.find().sort({ balance: -1 }).limit(10);
+  let leaderboardMessage = '🏆 **Top Players**\n\n';
+  
+  topUsers.forEach((user, index) => {
+    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🔸';
+    leaderboardMessage += `${medal} ${user.firstName}: ${user.balance} coins\n`;
+  });
+  
+  bot.sendMessage(msg.chat.id, leaderboardMessage, { parse_mode: 'Markdown' });
+});
+
+// Helper function to calculate level
+function calculateLevel(balance) {
+  for (let i = LEVEL_THRESHOLDS.length - 1; i >= 0; i--) {
+    if (balance >= LEVEL_THRESHOLDS[i]) {
+      return i + 1;
+    }
+  }
+  return 1;
+}
+
+// Web server
+app.get('/', (req, res) => {
+  res.send('TapCoin Telegram Bot is running!');
+});
+
+// Admin route to check donations (optional)
+app.get('/donations', async (req, res) => {
+  try {
+    const donations = await Donation.find().populate('userId').sort({ createdAt: -1 });
+    res.json(donations);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
