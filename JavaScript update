@@ -1,0 +1,43 @@
+// ... existing code ...
+
+// Serve static files from the 'public' directory
+app.use(express.static('public'));
+
+// API route to get user data
+app.get('/api/user/:userId', async (req, res) => {
+  try {
+    const user = await User.findOne({ userId: req.params.userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      balance: user.balance,
+      level: user.level
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API route to update balance
+app.post('/api/update-balance', async (req, res) => {
+  try {
+    const { userId, balance } = req.body;
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    user.balance = balance;
+    // Also update level based on balance
+    const newLevel = calculateLevel(balance);
+    if (newLevel > user.level) {
+      user.level = newLevel;
+    }
+    await user.save();
+    res.json({ success: true, level: user.level });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ... existing bot code ...
